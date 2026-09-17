@@ -1,23 +1,21 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.10"
 # dependencies = [
-#     "loguru",
-#     "mss",
-#     "opencv-python",
-#     "torch>=2.8.0",
-#     "torchvision",
-#     "transformers>=5.0.0",
-#     "accelerate",
-#     "mcap-owa-support>=0.6.5",
-#     "owa-core>=0.6.5",
-#     "owa-msgs>=0.6.5",
-#     "owa-env-desktop>=0.6.5",
-#     "owa-data @ git+https://github.com/open-world-agents/open-world-agents@8fee481a65c719b8565a674de62966f955e911cf#subdirectory=projects/owa-data",
+#     "loguru==0.7.2",
+#     "mss==10.1.0",
+#     "torch==2.8.0",
+#     "torchvision==0.23.0",
+#     "transformers==4.57.2",
+#     "accelerate==1.10.1",
+#     "mcap-owa-support @ git+https://github.com/lastdefiance20/open-world-agents.git#subdirectory=projects/mcap-owa-support",
+#     "owa-cli @ git+https://github.com/lastdefiance20/open-world-agents.git#subdirectory=projects/owa-cli",
+#     "owa-core @ git+https://github.com/lastdefiance20/open-world-agents.git#subdirectory=projects/owa-core",
+#     "owa-env-desktop @ git+https://github.com/lastdefiance20/open-world-agents.git#subdirectory=projects/owa-env-desktop",
+#     "owa-env-gst @ git+https://github.com/lastdefiance20/open-world-agents.git#subdirectory=projects/owa-env-gst",
+#     "owa-msgs @ git+https://github.com/lastdefiance20/open-world-agents.git#subdirectory=projects/owa-msgs",
+#     "owa-data @ git+https://github.com/lastdefiance20/open-world-agents.git#subdirectory=projects/owa-data",
 # ]
-#
-# [tool.uv]
-# exclude-newer = "2026-05-08"
 # ///
 """
 Generalist-IDM inference script: extracts actions from video and outputs MCAP.
@@ -48,10 +46,11 @@ from transformers import AutoModelForImageTextToText, AutoProcessor
 from mcap_owa.highlevel import OWAMcapReader, OWAMcapWriter
 from mcap_owa.highlevel.mcap_msg import McapMessage
 from owa.core import MESSAGES
-from owa.data.encoders import EventEncoderError, FactorizedEventEncoder, HierarchicalEventEncoder, create_encoder
+from owa.data.encoders import EventEncoderError, FactorizedEventEncoder, HierarchicalEventEncoder
+from owa.data.episode_tokenizer import EpisodeTokenizer, TokenizedEvent
 from owa.data.processing.resampler import EventResamplerDict
-from owa.data.tokenization import EventTokenizationContext, TokenizedEvent, decode_event, get_image_config, prepare_model_for_events, tokenize_event
 
+BASE_MODEL = "open-world-agents/Generalist-IDM-1B"
 ROOT = Path(__file__).resolve().parent
 MODEL_ID = str(ROOT.parent / "open-world-agents/checkpoints/cyberpunk_trial_best")
 DEFAULT_VIDEO = str(ROOT.parent / "open-world-agents/data/cyberpunk_test_trial2/trial2.mkv")
@@ -210,14 +209,14 @@ class _ContextManager:
         device: str,
         max_context_length: int,
         processor_image_processor,
-        tokenization_ctx: EventTokenizationContext,
+        episode_tokenizer: EpisodeTokenizer,
         callback: Optional[Callable[[McapMessage], None]] = None,
     ):
         self.device = device
         self.callback = callback
         self.max_context_length = max_context_length
         self.processor_image_processor = processor_image_processor
-        self.tokenization_ctx = tokenization_ctx
+        self.episode_tokenizer = episode_tokenizer
         self.sequences = torch.tensor([], dtype=torch.long, device=device)
         self.pixel_values = torch.tensor([], dtype=torch.bfloat16, device=device)
         self.event_indices = torch.tensor([], dtype=torch.long, device=device)
@@ -229,11 +228,11 @@ class _ContextManager:
         return f"Context(seq_len={len(self.sequences)}, images={len(self.pixel_values)}, events={len(self.event_indices)})"
 
     def append_event(self, event: McapMessage, *, dry_run: bool = False, is_timestamp_adjusted: bool = False) -> int:
-        tokenized_event = tokenize_event(self.tokenization_ctx, event)
+        tokenized_event = self.episode_tokenizer.tokenize_event(event)
         if hasattr(event, "_in_memory_image"):
             tokenized_event["images"] = [event._in_memory_image]
         
-        encoder = self.tokenization_ctx.encoder
+        encoder = self.episode_tokenizer.encoder
         if not isinstance(encoder, (HierarchicalEventEncoder, FactorizedEventEncoder)):
             raise NotImplementedError(f"Encoder type {type(encoder)} is not supported.")
         timestamp_range = encoder.config.timestamp_range
@@ -276,7 +275,7 @@ class _ContextManager:
 
             for img in new_images:
                 if hasattr(img, "to_pil_image"):
-                    pil_images.append(img.to_pil_image())
+                    pil_images.append(img.to_pil_image(keep_av_open=True))
                 else:
                     pil_images.append(img)
                     # logger.warning(f"Failed to load image: {e}. Using black placeholder.")
@@ -313,12 +312,10 @@ class InferencePipeline:
             )
 
         self.model.eval()
-        self.processor = AutoProcessor.from_pretrained(config.model_path, trust_remote_code=config.trust_remote_code)
+        self.processor = AutoProcessor.from_pretrained(BASE_MODEL, trust_remote_code=config.trust_remote_code)
         self.tokenizer = self.processor.tokenizer
-        image_config = get_image_config(config.model_path)
-        encoder = create_encoder("factorized", fake_image_placeholder=image_config.fake_placeholder)
-        prepare_model_for_events(self.tokenizer, encoder, image_config, self.model)
-        self.tokenization_ctx = EventTokenizationContext(encoder=encoder, tokenizer=self.tokenizer, image_config=image_config)
+        self.episode_tokenizer = EpisodeTokenizer.from_transformers(BASE_MODEL)
+        self.episode_tokenizer.prepare_model(tokenizer=self.tokenizer, model=self.model)
         self._eos_token_id = self.tokenizer.encode("<EVENT_END>")[0]
 
     def _generate_single_event(self, sequences: torch.Tensor, pixel_values: torch.Tensor) -> torch.LongTensor:
@@ -359,7 +356,7 @@ class InferencePipeline:
             device=self.config.device,
             max_context_length=self.config.max_context_length,
             processor_image_processor=self.processor.image_processor,
-            tokenization_ctx=self.tokenization_ctx,
+            episode_tokenizer=self.episode_tokenizer,
             callback=lambda x: None)
 
         ScreenCaptured = MESSAGES["desktop/ScreenCaptured"]
@@ -463,7 +460,7 @@ class InferencePipeline:
                     img_token_id = self.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
                     filtered_tokens = new_tokens[new_tokens != img_token_id]
                     # decoded_text = self.tokenizer.decode(filtered_tokens, skip_special_tokens=False)
-                    generated_event = decode_event(self.tokenization_ctx, filtered_tokens.cpu().numpy())
+                    generated_event = self.episode_tokenizer.decode_event(filtered_tokens.cpu().numpy())
 
                 except EventEncoderError:
                     break
@@ -553,7 +550,7 @@ class InferencePipeline:
             device=self.config.device,
             max_context_length=self.config.max_context_length,
             processor_image_processor=self.processor.image_processor,
-            tokenization_ctx=self.tokenization_ctx,
+            episode_tokenizer=self.episode_tokenizer,
             callback=output_event,
         )
         if apply_resampler:
@@ -576,7 +573,7 @@ class InferencePipeline:
                 sequences = context.sequences.unsqueeze(0)
                 new_tokens = self._generate_single_event(sequences, context.pixel_values)
                 try:
-                    generated_event = decode_event(self.tokenization_ctx, new_tokens.cpu().numpy())
+                    generated_event = self.episode_tokenizer.decode_event(new_tokens.cpu().numpy())
                 except EventEncoderError:
                     logger.debug("Generated invalid event, stopping generation for this gap")
                     break

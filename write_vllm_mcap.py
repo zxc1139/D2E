@@ -16,8 +16,8 @@ from transformers import AutoTokenizer
 
 from mcap_owa.highlevel import OWAMcapWriter
 from owa.core import MESSAGES
-from owa.data.encoders import EventEncoderError, create_encoder
-from owa.data.tokenization import EventTokenizationContext, decode_event, get_image_config, prepare_model_for_events
+from owa.data.encoders import EventEncoderError
+from owa.data.episode_tokenizer import EpisodeTokenizer
 
 
 def main() -> int:
@@ -30,10 +30,8 @@ def main() -> int:
     args = parser.parse_args()
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    image_config = get_image_config(str(args.model))
-    encoder = create_encoder("factorized", fake_image_placeholder=image_config.fake_placeholder)
-    prepare_model_for_events(tokenizer, encoder, image_config)
-    tokenization_ctx = EventTokenizationContext(encoder=encoder, tokenizer=tokenizer, image_config=image_config)
+    episode_tokenizer = EpisodeTokenizer.from_transformers(str(args.model))
+    episode_tokenizer.prepare_model(tokenizer=tokenizer)
     ScreenCaptured = MESSAGES["desktop/ScreenCaptured"]
     video_path = str(args.video.resolve())
     shift_ns = int(args.time_shift * 1_000_000_000)
@@ -57,8 +55,7 @@ def main() -> int:
                 continue
 
             try:
-                event = decode_event(
-                    tokenization_ctx,
+                event = episode_tokenizer.decode_event(
                     np.asarray(record["token_ids"], dtype=np.int64)
                 )
             except EventEncoderError as error:
