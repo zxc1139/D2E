@@ -18,6 +18,10 @@ vllm_tokenizer/
 *_eval_results.json
 trial_outputs/
 
+# Local model diagnostics
+test_transformers_golden.py
+test_vllm_load.py
+
 # Local media and scratch datasets
 *.mkv
 *.mp4
