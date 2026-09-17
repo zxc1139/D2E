@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors
+.vscode/
+
+# Local models and converted accelerator artifacts
+vllm_model/
+vllm_tokenizer/
+*.onnx
+*.engine
+*.plan
+
+# Generated inference and evaluation artifacts
+*.mcap
+*.pt
+*_eval_results.json
+trial_outputs/
+
+# Local media and scratch datasets
+*.mkv
+*.mp4
+test_data/
+
+# Local experiment archives and environment snapshots
+_archive/
+*-before-*.txt
+*-current-*.txt
